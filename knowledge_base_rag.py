@@ -19,12 +19,14 @@ class DeepSeekKnowledgeBase:
         model_name="BAAI/bge-large-zh",
         llm_path="deepseek-ai/deepseek-llm-7b-chat",
         device="cuda" if torch.cuda.is_available() else "cpu",
+        chunk_size=1000,
+        chunk_overlap=100,
     ):
         self.device = device
         self.embedding_model_path = model_name
         self.llm_path = llm_path
         self.documents = []
-        self.text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
+        self.text_splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
 
         # 初始化Embedding模型
         self.embeddings = HuggingFaceEmbeddings(
@@ -68,6 +70,11 @@ class DeepSeekKnowledgeBase:
         """处理图像文件"""
         try:
             img = Image.open(file_path)
+            # 图像预处理：调整大小、二值化、去噪
+            img = img.resize((img.width * 2, img.height * 2), Image.LANCZOS)  # 提高分辨率
+            img = img.convert("L")  # 转换为灰度图像
+            img = img.point(lambda x: 0 if x < 128 else 255, "1")  # 二值化
+
             # 基本OCR处理
             text = self.ocr_tool.image_to_string(img)
 
@@ -737,12 +744,13 @@ class DocumentReranker:
         document_pairs = [[query, doc.page_content] for doc in documents]
 
         # 计算分数
-        scores = self.reranker.predict(document_pairs)
+        scores = self.reranker.predict(document_pairs, show_progress_bar=False)
+        # 检查预测结果是否包含空值
+        if any(score is None for score in scores):
+            scores = [0 if s is None else s for s in scores]
 
-        # 结合分数和文档
+        # 结合分数和文档，按分数排序
         scored_documents = list(zip(documents, scores))
-
-        # 排序
         scored_documents.sort(key=lambda x: x[1], reverse=True)
 
         # 提取排序后的文档
@@ -857,16 +865,23 @@ def main():
     rag_system.add_document("path/to/image.jpg")
 
     # 构建知识库
-    rag_system.build_knowledge_base()
+    vectorstore = rag_system.build_knowledge_base()
+    if vectorstore is None:
+        print("知识库构建失败，请检查文档路径或模型配置")
+        return
 
     # 查询示例
-    result = rag_system.query("DeepSeek模型的特点是什么?")
-    print(f"回答: {result['answer']}")
-    print(f"来源: {result['sources']}")
+    query = "DeepSeek模型的特点是什么?"
+    result = rag_system.query(query, vectorstore)
+    print(f"回答: {result.content}")
 
     # 带图像的查询示例
-    image_result = rag_system.query("图表中的趋势是什么?", image_path="path/to/chart.png")
-    print(f"图像分析回答: {image_result['answer']}")
+    image_path = "path/to/chart.png"
+    try:
+        image_result = rag_system.query("图表中的趋势是什么?", image_path=image_path)
+        print(f"图像分析回答: {image_result.content}")
+    except Exception as e:
+        print(f"图像查询失败: {e}")
 
 
 if __name__ == "__main__":
